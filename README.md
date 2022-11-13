@@ -35,3 +35,27 @@ With 1 MB buffers, and 16 byte allocation chunks, 8 threads on a slow laptop
 
 As expected, once in awhile threads get blocked on the mutex in the locking version and eat up system time.  If they just busy waited in
 userspace longer they'd look more like the lockless version.
+
+Until the work-time spent outside the lock approaches the time taken in the system call (about 1 us) the lockless version wins.  After that it doesn't matter anymore.  I think the threads end up synchronized nicely at that point.  6/8 threads are working while two are fighting for a lock?  I don't have this worked out in my head yet.
+
+    SAP-BUFFER-SBCL> (test-lockless-performance :num-threads 8 :repeat 1000 :work-time-ns 1000)
+     Evaluation took:
+     0.552 seconds of real time
+     3.960369 seconds of total run time (3.960369 user, 0.000000 system)
+     717.39% CPU
+     1,105,923,517 processor cycles
+     1,263,616 bytes consed
+  
+    Current buffer 262144 / 1048576 used
+    32 total buffers allocated
+
+    SAP-BUFFER-SBCL> (test-locked-performance :num-threads 8 :repeat 1000 :work-time-ns 1000)
+     Evaluation took:
+     0.684 seconds of real time
+     4.604495 seconds of total run time (4.191363 user, 0.413132 system)
+     673.10% CPU
+     1,365,104,345 processor cycles
+     1,240,560 bytes consed
+  
+    Current buffer 262144 / 1048576 used
+    32 total buffers allocated
