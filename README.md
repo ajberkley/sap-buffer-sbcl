@@ -11,28 +11,27 @@ The first comparison is a locked buffer and a buffer with atomic allocation.  Wh
 
 With 1 MB buffers, and 16 byte allocation chunks, 8 threads on a slow laptop
 
-SAP-BUFFER-SBCL> (test-lockless-performance :num-threads 8 :repeat 1000 :work-time-ns 0)
-Evaluation took:
-  0.275 seconds of real time
-  1.849875 seconds of total run time (1.849875 user, 0.000000 system)
-  672.73% CPU
-  549,079,380 processor cycles
-  1,281,344 bytes consed
+    SAP-BUFFER-SBCL> (test-lockless-performance :num-threads 8 :repeat 1000 :work-time-ns 0)
+    Evaluation took:
+      0.275 seconds of real time
+      1.849875 seconds of total run time (1.849875 user, 0.000000 system)
+      672.73% CPU
+      549,079,380 processor cycles
+      1,281,344 bytes consed
   
-Current buffer 262144 / 1048576 used
-32 total buffers allocated
+    Current buffer 262144 / 1048576 used
+    32 total buffers allocated
 
-SAP-BUFFER-SBCL> (test-locked-performance :num-threads 8 :repeat 1000 :work-time-ns 0)
-
-Evaluation took:
-  0.539 seconds of real time
-  3.787209 seconds of total run time (1.817162 user, 1.970047 system)
-  702.60% CPU
-  1,076,471,206 processor cycles
-  1,288,944 bytes consed
+    SAP-BUFFER-SBCL> (test-locked-performance :num-threads 8 :repeat 1000 :work-time-ns 0)
+    Evaluation took:
+      0.539 seconds of real time
+      3.787209 seconds of total run time (1.817162 user, 1.970047 system)
+      702.60% CPU
+      1,076,471,206 processor cycles
+      1,288,944 bytes consed
   
-Current buffer 262144 / 1048576 used
-32 total buffers allocated
+    Current buffer 262144 / 1048576 used
+    32 total buffers allocated
 
 As expected, once in awhile threads get blocked on the mutex in the locking version and eat up system time.  If they just busy waited in
 userspace longer they'd look more like the lockless version.
