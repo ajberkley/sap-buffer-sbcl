@@ -112,7 +112,7 @@
          (when (> (the fixnum (+ old-offset size)) buf-size) ; we are out of space
            (funcall flush-buffer (cons old-offset buf))
            (go try-allocate))
-         (return-from allocate-lockless (values sap (the fixnum (+ size old-offset))))))))
+         (return-from allocate-lockless (values sap (the fixnum old-offset)))))))
 
 (defun test-lockless-performance (&key (num-threads 16) (work-time-ns 10) (alloc-size 16) (num-allocs-per-thread 256000))
   (declare (optimize speed safety) (type fixnum repeat num-allocs-per-thread alloc-size))
