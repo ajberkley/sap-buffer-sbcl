@@ -88,5 +88,5 @@
                   (setf (cdr ,tail) list)
                   (setf ,tail last-cons)))
          (declare (ignorable #',collect-verb #',append-verb))
-         (symbol-macrolet ((,target (cdr ,target-real)))
+         (symbol-macrolet ((,target (the list (cdr ,target-real))))
            ,@body)))))

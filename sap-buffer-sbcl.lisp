@@ -58,8 +58,8 @@
 (defun test-locked-performance (&key (num-threads 16) (work-time-ns 10) (alloc-size 16) (num-allocs-per-thread 256) (repeat 10))
   (declare (optimize speed safety) (type fixnum num-threads num-allocs-per-thread repeat alloc-size))
   (ignore-symbol-package-locked-error
-    (letf* (((symbol-function 'sb-thread::check-deadlock) (constantly t))) ;; cons'es a lot
-      (let* ((current-buffer (make-locked-foreign-buffer *sap-buffer-bytes*))
+    (letf* (((symbol-function 'sb-thread::check-deadlock) (constantly t))) ; cons'es a lot
+      (let* ((current-buffer (make-locked-foreign-buffer *sap-buffer-bytes*)) ; we reuse this structure
              (get-current-buffer (lambda () current-buffer)))
         (with-collect (finished-buffers collect!)
           (lparallel.kernel-util:with-temp-kernel (num-threads)
@@ -82,7 +82,7 @@
 
 (defstruct (lockless-foreign-buffer (:constructor %make-lockless-foreign-buffer))
   (sap nil :type (or null sb-sys:system-area-pointer))
-  (offset 0 :type (unsigned-byte 64)) ;; next free byte
+  (offset 0 :type (unsigned-byte 64)) ; next free byte
   (size 0 :type (unsigned-byte 64))
   (lock (sb-thread:make-mutex) :type sb-thread:mutex)
   (alien nil :type sb-alien:alien))
@@ -97,31 +97,29 @@
 
 (declaim (inline allocate-lockless))
 (defun allocate-lockless (size get-current-buffer flush-buffer)
-  (declare (optimize speed safety))
   (tagbody
-   try
+   try-allocate
      (let* ((buf (funcall get-current-buffer))
             (sap (lockless-foreign-buffer-sap buf))
-            (buf-size (lockless-foreign-buffer-size buf))) ;; not allowed to change
-       ;; try allocate
+            (buf-size (lockless-foreign-buffer-size buf)))
        (let ((old-offset (sb-ext:atomic-incf (lockless-foreign-buffer-offset buf) size)))
          (declare (type fixnum old-offset))
-         (when (> old-offset buf-size) ;; someone else hit the end before us and is flushing the buffer
-           (go try))
-         (when (> (the fixnum (+ old-offset size)) buf-size) ;; we are out of space
+         (when (> old-offset buf-size) ; someone else hit the end before us and is flushing the buffer
+           (go try-allocate))
+         (when (> (the fixnum (+ old-offset size)) buf-size) ; we are out of space
            (funcall flush-buffer (cons old-offset buf))
-           (go try))
+           (go try-allocate))
          (return-from allocate-lockless (values sap (the fixnum (+ size old-offset))))))))
 
 (defun test-lockless-performance (&key (num-threads 16) (work-time-ns 10) (alloc-size 16) (num-allocs-per-thread 256) (repeat 10))
   (declare (optimize speed safety) (type fixnum repeat num-allocs-per-thread alloc-size))
-  (let* ((current-buffer (make-lockless-foreign-buffer *sap-buffer-bytes*))
-         (lock (sb-thread:make-mutex))) ;; for flushing buffers
+  (let* ((current-buffer (make-lockless-foreign-buffer *sap-buffer-bytes*)) ; not reused
+         (flush-lock (sb-thread:make-mutex))) ; for flushing buffers
     (labels ((get-current-buffer () current-buffer))
       (declare (inline get-current-buffer))
       (with-collect (finished-buffers collect!)
         (labels ((locked-flush (buffer)
-                   (sb-thread:with-mutex (lock)
+                   (sb-thread:with-mutex (flush-lock)
                      (collect! buffer)
                      (setf current-buffer (make-lockless-foreign-buffer *sap-buffer-bytes*)))))
           (lparallel.kernel-util:with-temp-kernel (num-threads)
