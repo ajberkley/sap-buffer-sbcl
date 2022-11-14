@@ -55,7 +55,7 @@
                (new-buffer buf)
                (go try)))))))
 
-(defun test-locked-performance (&key (num-threads 16) (work-time-ns 10) (alloc-size 16) (num-allocs-per-thread 256) (repeat 10))
+(defun test-locked-performance (&key (num-threads 16) (work-time-ns 10) (alloc-size 16) (num-allocs-per-thread 256000))
   (declare (optimize speed safety) (type fixnum num-threads num-allocs-per-thread repeat alloc-size))
   (ignore-symbol-package-locked-error
     (letf* (((symbol-function 'sb-thread::check-deadlock) (constantly t))) ; cons'es a lot
@@ -64,17 +64,17 @@
         (with-collect (finished-buffers collect!)
           (lparallel.kernel-util:with-temp-kernel (num-threads)
             (time
-             (dotimes (r repeat)
-               (lparallel:pdotimes (n num-threads)
-                 (declare (ignore n))
-                 (loop repeat num-allocs-per-thread
-                       do (allocate-locked alloc-size get-current-buffer #'collect!)
-                          (busy-wait-ns work-time-ns))))))
+             (lparallel:pdotimes (n num-threads)
+               (declare (ignore n))
+               (loop repeat num-allocs-per-thread
+                     do (allocate-locked alloc-size get-current-buffer #'collect!)
+                        (busy-wait-ns work-time-ns)))))
           (format t "Current buffer ~A / ~A used~%"
                   (locked-foreign-buffer-offset current-buffer)
                   (locked-foreign-buffer-size-bytes current-buffer))
           (collect! (cons (locked-foreign-buffer-offset current-buffer) (locked-foreign-buffer-alien current-buffer)))
-          (format t "~A total buffers allocated~%" (length finished-buffers))
+          (format t "~A total buffers allocated for ~A bytes total used~%" (length finished-buffers)
+                  (* (length finished-buffers) *sap-buffer-bytes*))
           (map nil (lambda (lfb) (free-alien (cdr lfb)))
                finished-buffers))))))
 
@@ -111,7 +111,7 @@
            (go try-allocate))
          (return-from allocate-lockless (values sap (the fixnum (+ size old-offset))))))))
 
-(defun test-lockless-performance (&key (num-threads 16) (work-time-ns 10) (alloc-size 16) (num-allocs-per-thread 256) (repeat 10))
+(defun test-lockless-performance (&key (num-threads 16) (work-time-ns 10) (alloc-size 16) (num-allocs-per-thread 256000))
   (declare (optimize speed safety) (type fixnum repeat num-allocs-per-thread alloc-size))
   (let* ((current-buffer (make-lockless-foreign-buffer *sap-buffer-bytes*)) ; not reused
          (flush-lock (sb-thread:make-mutex))) ; for flushing buffers
@@ -124,17 +124,17 @@
                      (setf current-buffer (make-lockless-foreign-buffer *sap-buffer-bytes*)))))
           (lparallel.kernel-util:with-temp-kernel (num-threads)
             (time
-             (dotimes (r repeat)
-               (lparallel:pdotimes (n num-threads)
-                 (declare (ignore n))
-                 (loop repeat num-allocs-per-thread
-                       do (allocate-lockless alloc-size #'get-current-buffer #'locked-flush)
-                          (busy-wait-ns work-time-ns))))))
+             (lparallel:pdotimes (n num-threads)
+               (declare (ignore n))
+               (loop repeat num-allocs-per-thread
+                     do (allocate-lockless alloc-size #'get-current-buffer #'locked-flush)
+                        (busy-wait-ns work-time-ns)))))
           (format t "Current buffer ~A / ~A used~%"
                   (lockless-foreign-buffer-offset current-buffer)
                   (lockless-foreign-buffer-size current-buffer))
           (collect! (cons (lockless-foreign-buffer-offset current-buffer) current-buffer))
-          (format t "~A total buffers allocated~%" (length finished-buffers))
+          (format t "~A total buffers allocated for ~A bytes total used~%" (length finished-buffers)
+                  (* (length finished-buffers) *sap-buffer-bytes*))
           (map nil (lambda (lockless-foreign-buffer-info)
                      (sb-alien:free-alien (lockless-foreign-buffer-alien (cdr lockless-foreign-buffer-info))))
                finished-buffers))))))
