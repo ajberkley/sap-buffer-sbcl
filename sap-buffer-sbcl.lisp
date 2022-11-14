@@ -14,6 +14,10 @@
 (defun alien-sap (alien)
   (sb-alien:alien-sap alien))
 
+(defvar *sap-buffer-bytes* (expt 2 20))
+
+;; LOCKED VERSION
+
 (defstruct (locked-foreign-buffer (:constructor %make-locked-foreign-buffer))
   (sap nil :type (or null sb-sys:system-area-pointer))
   (offset 0 :type fixnum) ;; next free byte
@@ -29,8 +33,7 @@
      :size-bytes bytes
      :alien alien)))
 
-(defvar *sap-buffer-bytes* (expt 2 20))
-
+;; We mutate our locked-foreign-buffer in place to avoid need to share locks... 
 (defun new-buffer (locked-foreign-buffer &optional (bytes *sap-buffer-bytes*))
   (let ((new-alien (new-alien bytes)))
     (setf (locked-foreign-buffer-alien locked-foreign-buffer) new-alien)
@@ -78,7 +81,7 @@
           (map nil (lambda (lfb) (free-alien (cdr lfb)))
                finished-buffers))))))
 
-;;;;; LOCKLESS
+;;;;; LOCKLESS VERSION (getting a new buffer is still a locked operation)
 
 (defstruct (lockless-foreign-buffer (:constructor %make-lockless-foreign-buffer))
   (sap nil :type (or null sb-sys:system-area-pointer))
