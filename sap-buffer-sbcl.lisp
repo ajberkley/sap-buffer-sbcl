@@ -1,190 +1,142 @@
 (defpackage #:sap-buffer-sbcl
   (:use #:common-lisp)
-  (:import-from #:lparallel))
+  (:import-from #:lparallel)
+  (:import-from #:sap-buffer-sbcl-util #:busy-wait-ns #:ignore-symbol-package-locked-error #:letf* #:with-collect))
 
 (in-package #:sap-buffer-sbcl)
 
-(sb-alien:define-alien-type clockid-t (sb-alien:signed 32))
-(defconstant +clock-monotonic+ 1)
+(defun new-alien (bytes)
+  (sb-alien:make-alien (sb-alien:unsigned 8) bytes))
 
-(declaim (inline clock-gettime))
-(sb-alien:define-alien-routine clock-gettime sb-alien:int
-  (clockid clockid-t :in)
-  (sp (* (sb-alien:struct sb-unix::timespec)) :in))
-
-(declaim (inline get-internal-real-time-ns))
-(defun get-internal-real-time-ns ()
-  (declare (optimize speed))
-  (declare (inline clock-gettime))
-  (sb-alien:with-alien ((sp (sb-alien:struct sb-unix::timespec)))
-    (clock-gettime +clock-monotonic+ (sb-alien:addr sp))
-    (let ((sec (sb-alien:slot sp 'sb-unix::tv-sec))
-          (nsec (sb-alien:slot sp 'sb-unix::tv-nsec)))
-      (declare (type (integer 0 999999999) nsec))
-      (declare (type (unsigned-byte 32) sec))
-      (+ (* sec 1000000000) nsec))))
-
-(defun busy-wait-ns (ns)
-  ;; not good for less than 100 ns or so
-  (let ((end-time (+ ns (get-internal-real-time-ns))))
-    (loop while (< (get-internal-real-time-ns) end-time))))
-
-;; Simple implementation, lock on allocate
-
-(defvar *sap-buffer-size* (expt 2 20))
-
-(defun new-sap-buffer (&optional (size *sap-buffer-size*))
-  (values (sb-alien:make-alien (sb-alien:unsigned 8) size) size))
-
-(defun free-sap-buffer (alien)
+(defun free-alien (alien)
   (sb-alien:free-alien alien))
 
-(defvar *results-lock* (sb-thread:make-mutex))
-
-(defvar *results* nil
-  "A list of (cons used-size alien)")
-
-(defun locked-foreign-buffer-flush (buf)
-  (sb-thread:with-recursive-lock (*results-lock*)
-    (push (cons (locked-foreign-buffer-offset buf) (locked-foreign-buffer-alien buf)) *results*)
-    (multiple-value-bind (alien size)
-        (new-sap-buffer)
-    (setf (locked-foreign-buffer-alien buf) alien)
-    (setf (locked-foreign-buffer-offset buf) 0)
-    (setf (locked-foreign-buffer-size buf) size))))
+(defun alien-sap (alien)
+  (sb-alien:alien-sap alien))
 
 (defstruct (locked-foreign-buffer (:constructor %make-locked-foreign-buffer))
   (sap nil :type (or null sb-sys:system-area-pointer))
   (offset 0 :type fixnum) ;; next free byte
-  (size 0 :type fixnum)
+  (size-bytes 0 :type fixnum)
   (lock (sb-thread:make-mutex) :type sb-thread:mutex)
   (alien nil :type sb-alien:alien))
 
-(defun make-locked-foreign-buffer (&optional (size *sap-buffer-size*))
-  (let ((alien (sb-alien:make-alien (sb-alien:unsigned 8) size)))
+(defun make-locked-foreign-buffer (bytes)
+  (let ((alien (new-alien bytes)))
     (%make-locked-foreign-buffer
-     :sap (sb-alien:alien-sap alien)
+     :sap (alien-sap alien)
      :offset 0
-     :size size
+     :size-bytes bytes
      :alien alien)))
 
-(defun free-results ()
-  (sb-thread:with-mutex (*results-lock*)
-    (map nil (lambda (locked-foreign-buffer-info)
-               (sb-alien:free-alien (cdr locked-foreign-buffer-info)))
-         *results*)
-    (setf *results* nil)))
+(defvar *sap-buffer-bytes* (expt 2 20))
 
-(defvar *current-buffer* (make-locked-foreign-buffer))
+(defun new-buffer (locked-foreign-buffer &optional (bytes *sap-buffer-bytes*))
+  (let ((new-alien (new-alien bytes)))
+    (setf (locked-foreign-buffer-alien locked-foreign-buffer) new-alien)
+    (setf (locked-foreign-buffer-offset locked-foreign-buffer) 0)
+    (setf (locked-foreign-buffer-size-bytes locked-foreign-buffer) bytes)
+    (setf (locked-foreign-buffer-sap locked-foreign-buffer) (alien-sap new-alien)))
+  locked-foreign-buffer)
 
-(defun allocate-locked (size)
-    (tagbody
-     try
-       ;; This could be a buffer which is already flushed!
-       (let ((buf *current-buffer*))
-         (sb-thread:with-mutex ((locked-foreign-buffer-lock buf))
-           (if (<= (+ (locked-foreign-buffer-offset buf) size)
-                   (locked-foreign-buffer-size buf))
-               (prog1
-                   (locked-foreign-buffer-offset buf)
-                 (incf (locked-foreign-buffer-offset buf) size))
-               (progn
-                 (locked-foreign-buffer-flush buf)
-                 (go try)))))))
+(declaim (inline allocate-locked))
+(defun allocate-locked (size get-current-buffer flush-current-buffer)
+  (tagbody
+   try
+     (let ((buf (funcall get-current-buffer)))
+       (sb-thread:with-mutex ((locked-foreign-buffer-lock buf))
+         (if (<= (the fixnum (+ (locked-foreign-buffer-offset buf) size))
+                 (locked-foreign-buffer-size-bytes buf))
+             (prog1
+                 (locked-foreign-buffer-offset buf)
+               (incf (locked-foreign-buffer-offset buf) size))
+             (progn
+               (funcall flush-current-buffer (cons (locked-foreign-buffer-offset buf) (locked-foreign-buffer-alien buf)))
+               (new-buffer buf)
+               (go try)))))))
 
 (defun test-locked-performance (&key (num-threads 16) (work-time-ns 10) (alloc-size 16) (num-allocs-per-thread 256) (repeat 10))
-  (let ((old-func (symbol-function 'sb-thread::check-deadlock)))
-    (unwind-protect
-         (progn
-           (handler-bind ((sb-ext:symbol-package-locked-error (lambda (e)
-                                                                (declare (ignore e))
-                                                                (invoke-restart (find-restart :ignore-all)))))
-             (setf (symbol-function 'sb-thread::check-deadlock) (constantly t)))
-           (lparallel.kernel-util:with-temp-kernel (num-threads)
-             (time
-              (dotimes (r repeat)
-                (lparallel:pdotimes (n num-threads)
-                  (declare (ignore n))
-                  (loop repeat num-allocs-per-thread
-                        do (allocate-locked alloc-size)
-                           (busy-wait-ns work-time-ns))))))
-           (format t "Current buffer ~A / ~A used~%"
-                   (locked-foreign-buffer-offset *current-buffer*)
-                   (locked-foreign-buffer-size *current-buffer*))
-           (locked-foreign-buffer-flush *current-buffer*)
-           (format t "~A total buffers allocated~%" (length *results*))
-           (free-results))
-      (handler-bind ((sb-ext:symbol-package-locked-error (lambda (e)
-                                                           (declare (ignore e))
-                                                           (invoke-restart (find-restart :ignore-all)))))
-        (setf (symbol-function 'sb-thread::check-deadlock) old-func)))))
+  (declare (optimize speed safety) (type fixnum num-threads num-allocs-per-thread repeat alloc-size))
+  (ignore-symbol-package-locked-error
+    (letf* (((symbol-function 'sb-thread::check-deadlock) (constantly t))) ;; cons'es a lot
+      (let* ((current-buffer (make-locked-foreign-buffer *sap-buffer-bytes*))
+             (get-current-buffer (lambda () current-buffer)))
+        (with-collect (finished-buffers collect!)
+          (lparallel.kernel-util:with-temp-kernel (num-threads)
+            (time
+             (dotimes (r repeat)
+               (lparallel:pdotimes (n num-threads)
+                 (declare (ignore n))
+                 (loop repeat num-allocs-per-thread
+                       do (allocate-locked alloc-size get-current-buffer #'collect!)
+                          (busy-wait-ns work-time-ns))))))
+          (format t "Current buffer ~A / ~A used~%"
+                  (locked-foreign-buffer-offset current-buffer)
+                  (locked-foreign-buffer-size-bytes current-buffer))
+          (collect! (cons (locked-foreign-buffer-offset current-buffer) (locked-foreign-buffer-alien current-buffer)))
+          (format t "~A total buffers allocated~%" (length finished-buffers))
+          (map nil (lambda (lfb) (free-alien (cdr lfb)))
+               finished-buffers))))))
 
 ;;;;; LOCKLESS
-
-(defvar *lockless-results* nil)
-(defvar *lockless-results-lock* (sb-thread:make-mutex))
-
-(defun free-lockless-results ()
-  (sb-thread:with-mutex (*lockless-results-lock*)
-    (map nil (lambda (lockless-foreign-buffer-info)
-               (sb-alien:free-alien (cdr lockless-foreign-buffer-info)))
-         *lockless-results*)
-    (setf *lockless-results* nil)))
 
 (defstruct (lockless-foreign-buffer (:constructor %make-lockless-foreign-buffer))
   (sap nil :type (or null sb-sys:system-area-pointer))
   (offset 0 :type (unsigned-byte 64)) ;; next free byte
   (size 0 :type (unsigned-byte 64))
   (lock (sb-thread:make-mutex) :type sb-thread:mutex)
-  (flusher #'identity)
   (alien nil :type sb-alien:alien))
 
-(defun make-lockless-foreign-buffer (&optional (size *sap-buffer-size*))
-  (let ((alien (sb-alien:make-alien (sb-alien:unsigned 8) size)))
+(defun make-lockless-foreign-buffer (&optional (size *sap-buffer-bytes*))
+  (let ((alien (new-alien size)))
     (%make-lockless-foreign-buffer
-     :sap (sb-alien:alien-sap alien)
+     :sap (alien-sap alien)
      :offset 0
      :size size
-     :alien alien
-     :flusher 'lockless-foreign-buffer-flush)))
+     :alien alien)))
 
-(defvar *current-lockless-buffer* (make-lockless-foreign-buffer))
-
-(defun lockless-foreign-buffer-flush (buf real-size)
-  ;; Flushing is a locked operation
-  (sb-thread:with-recursive-lock ((lockless-foreign-buffer-lock buf))
-    (push (cons real-size (lockless-foreign-buffer-alien buf)) *lockless-results*)
-    (setf *current-lockless-buffer* (make-lockless-foreign-buffer))))
-
-(defun allocate-lockless (size)
+(declaim (inline allocate-lockless))
+(defun allocate-lockless (size get-current-buffer flush-buffer)
+  (declare (optimize speed safety))
   (tagbody
    try
-     (let* ((buf *current-lockless-buffer*)
+     (let* ((buf (funcall get-current-buffer))
             (sap (lockless-foreign-buffer-sap buf))
             (buf-size (lockless-foreign-buffer-size buf))) ;; not allowed to change
        ;; try allocate
        (let ((old-offset (sb-ext:atomic-incf (lockless-foreign-buffer-offset buf) size)))
+         (declare (type fixnum old-offset))
          (when (> old-offset buf-size) ;; someone else hit the end before us and is flushing the buffer
            (go try))
-         (when (> (+ old-offset size) buf-size) ;; we are out of space
-           (funcall (lockless-foreign-buffer-flusher buf) buf old-offset)
+         (when (> (the fixnum (+ old-offset size)) buf-size) ;; we are out of space
+           (funcall flush-buffer (cons old-offset buf))
            (go try))
-         (return-from allocate-lockless (values sap (+ size old-offset)))))))
+         (return-from allocate-lockless (values sap (the fixnum (+ size old-offset))))))))
 
 (defun test-lockless-performance (&key (num-threads 16) (work-time-ns 10) (alloc-size 16) (num-allocs-per-thread 256) (repeat 10))
-  (lparallel.kernel-util:with-temp-kernel (num-threads)
-    (time
-     (dotimes (r repeat)
-       (lparallel:pdotimes (n num-threads)
-         (declare (ignore n))
-         (loop repeat num-allocs-per-thread
-               do (allocate-lockless alloc-size)
-                  (busy-wait-ns work-time-ns))))))
-  (format t "Current buffer ~A / ~A used~%"
-          (lockless-foreign-buffer-offset *current-lockless-buffer*)
-          (lockless-foreign-buffer-size *current-lockless-buffer*))
-  (funcall (lockless-foreign-buffer-flusher *current-lockless-buffer*)
-           *current-lockless-buffer*
-           (lockless-foreign-buffer-offset *current-lockless-buffer*))
-  (format t "~A total buffers allocated~%" (length *lockless-results*))
-  (free-lockless-results))
+  (declare (optimize speed safety) (type fixnum repeat num-allocs-per-thread alloc-size))
+  (let* ((current-buffer (make-lockless-foreign-buffer *sap-buffer-bytes*))
+         (lock (sb-thread:make-mutex))) ;; for flushing buffers
+    (labels ((get-current-buffer () current-buffer))
+      (declare (inline get-current-buffer))
+      (with-collect (finished-buffers collect!)
+        (labels ((locked-flush (buffer)
+                   (sb-thread:with-mutex (lock)
+                     (collect! buffer)
+                     (setf current-buffer (make-lockless-foreign-buffer *sap-buffer-bytes*)))))
+          (lparallel.kernel-util:with-temp-kernel (num-threads)
+            (time
+             (dotimes (r repeat)
+               (lparallel:pdotimes (n num-threads)
+                 (declare (ignore n))
+                 (loop repeat num-allocs-per-thread
+                       do (allocate-lockless alloc-size #'get-current-buffer #'locked-flush)
+                          (busy-wait-ns work-time-ns))))))
+          (format t "Current buffer ~A / ~A used~%"
+                  (lockless-foreign-buffer-offset current-buffer)
+                  (lockless-foreign-buffer-size current-buffer))
+          (collect! (cons (lockless-foreign-buffer-offset current-buffer) current-buffer))
+          (format t "~A total buffers allocated~%" (length finished-buffers))
+          (map nil (lambda (lockless-foreign-buffer-info)
+                     (sb-alien:free-alien (lockless-foreign-buffer-alien (cdr lockless-foreign-buffer-info))))
+               finished-buffers))))))
