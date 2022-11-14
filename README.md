@@ -49,13 +49,13 @@ Until the work-time spent outside the lock approaches the time taken in the syst
     Current buffer 262144 / 1048576 used
     32 total buffers allocated for 33554432 bytes total used
 
-   SAP-BUFFER-SBCL> (test-locked-performance :num-threads 8 :alloc-size 16 :num-allocs-per-thread (* 1000 256) :work-time-ns 2000)
-    Evaluation took:
-     0.607 seconds of real time
-     4.690721 seconds of total run time (4.009296 user, 0.681425 system)
-     772.82% CPU
-     1,213,595,883 processor cycles
-     0 bytes consed
+    SAP-BUFFER-SBCL> (test-locked-performance :num-threads 8 :alloc-size 16 :num-allocs-per-thread (* 1000 256) :work-time-ns 2000)
+     Evaluation took:
+      0.607 seconds of real time
+      4.690721 seconds of total run time (4.009296 user, 0.681425 system)
+      772.82% CPU
+      1,213,595,883 processor cycles
+      0 bytes consed
   
-   Current buffer 262144 / 1048576 used
-   32 total buffers allocated for 33554432 bytes total used
+    Current buffer 262144 / 1048576 used
+    32 total buffers allocated for 33554432 bytes total used
